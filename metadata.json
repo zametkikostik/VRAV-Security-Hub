@@ -1,0 +1,6 @@
+{
+  "name": "VRAV Security Hub",
+  "description": "Decentralized Zero-Trust App Store with AI-powered CI/CD static code auditing & vulnerability scanners.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
