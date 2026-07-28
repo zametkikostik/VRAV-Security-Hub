@@ -1,0 +1,12 @@
+node_modules/
+dist/
+.env
+.env.local
+.env.*.local
+uploads/
+*.log
+.DS_Store
+manifest.json.tmp.*
+server.js
+dist/server.cjs
+dist/server.cjs.map

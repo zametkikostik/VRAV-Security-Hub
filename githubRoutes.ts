@@ -36,7 +36,6 @@ export function registerGithubRoutes(app: Express, deps: Deps) {
     sha256Hex,
   } = deps;
 
-  /** Public: list releases for owner/repo */
   app.get('/api/github/releases', async (req, res) => {
     try {
       const owner = String(req.query.owner || '').trim();
@@ -87,7 +86,6 @@ export function registerGithubRoutes(app: Express, deps: Deps) {
     }
   });
 
-  /** Curated presets from env GITHUB_CATALOG_PRESETS=owner/repo,owner2/repo2 */
   app.get('/api/catalog/github-presets', (_req, res) => {
     const raw = process.env.GITHUB_CATALOG_PRESETS || '';
     const presets = raw
@@ -103,16 +101,13 @@ export function registerGithubRoutes(app: Express, deps: Deps) {
       presets:
         presets.length > 0
           ? presets
-          : [
-              { owner: 'zametkikostik', repo: 'VRAV-Security-Hub' },
-            ],
+          : [{ owner: 'zametkikostik', repo: 'VRAV-Security-Hub' }],
     });
   });
 
   /**
-   * Auth: import a GitHub release asset into manifest as catalog entry.
-   * Does NOT download the full binary to serve users — only metadata + optional client-provided sha256 + VT-by-hash.
-   * downloadUrl points to GitHub; install remains user-initiated off-platform.
+   * Import GitHub asset metadata into registry.
+   * Provide real file sha256 for hashVerified=true and meaningful VT.
    */
   app.post('/api/catalog/import-github', mutateLimiter, requireAuth, async (req, res) => {
     try {
@@ -140,9 +135,7 @@ export function registerGithubRoutes(app: Express, deps: Deps) {
 
       const b = body.data;
       if (!b.downloadUrl.includes('github.com') && !b.downloadUrl.includes('githubusercontent.com')) {
-        res.status(400).json({
-          error: 'downloadUrl must be a GitHub release asset URL',
-        });
+        res.status(400).json({ error: 'downloadUrl must be a GitHub release asset URL' });
         return;
       }
 
@@ -153,14 +146,19 @@ export function registerGithubRoutes(app: Express, deps: Deps) {
         return;
       }
 
-      let sha = b.sha256;
-      if (!sha) {
-        // Deterministic metadata hash — not a substitute for real file hash
-        sha = sha256Hex(`gh:${b.owner}/${b.repo}:${b.tag}:${b.assetName}:${b.downloadUrl}`);
-      }
+      const hashVerified = Boolean(b.sha256);
+      const sha =
+        b.sha256 ||
+        sha256Hex(`gh:${b.owner}/${b.repo}:${b.tag}:${b.assetName}:${b.downloadUrl}`);
 
-      const vt = await checkVirusTotalHash(sha);
-      const malicious = /malicious/i.test(vt);
+      // Only query VT on real file hashes — avoid false confidence from metadata digests
+      const vt = hashVerified
+        ? await checkVirusTotalHash(sha)
+        : 'VT deferred (provide real SHA-256 of the file)';
+
+      const malicious = hashVerified && /malicious/i.test(vt);
+      const suspicious = hashVerified && /suspicious/i.test(vt);
+
       const id = `gh-${b.owner}-${b.repo}-${b.tag}`
         .toLowerCase()
         .replace(/[^a-z0-9._-]+/g, '-')
@@ -168,6 +166,12 @@ export function registerGithubRoutes(app: Express, deps: Deps) {
 
       const apps = await readManifest();
       const idx = apps.findIndex((a: any) => a.id === id);
+
+      let trustScore = 40;
+      if (hashVerified && !malicious && !suspicious && /clean/i.test(vt)) trustScore = 85;
+      if (hashVerified && suspicious) trustScore = 35;
+      if (malicious) trustScore = 5;
+      if (!hashVerified) trustScore = Math.min(trustScore, 45);
 
       const record = {
         id,
@@ -180,19 +184,22 @@ export function registerGithubRoutes(app: Express, deps: Deps) {
         category: b.category || 'GitHub',
         ipfsHash: `github:${b.owner}/${b.repo}@${b.tag}`,
         sha256: sha,
+        hashVerified,
         reputationStaked: 0,
         authorizerSignature: `0x${sha256Hex('gh-sig:' + id).slice(0, 64)}`,
         virustotalScore: vt,
         permissionsCount: 0,
-        staticScanStatus: malicious ? 'critical' : /suspicious/i.test(vt) ? 'warning' : 'clean',
-        trustScore: malicious ? 5 : /unknown|skipped|error/i.test(vt) ? 50 : 80,
-        stakingAddress:
-          (req as any).authAddress?.startsWith?.('0x')
-            ? (req as any).authAddress
-            : `0x${sha256Hex('gh-addr:' + id).slice(0, 40)}`,
+        staticScanStatus: malicious
+          ? 'critical'
+          : suspicious || !hashVerified
+            ? 'warning'
+            : 'clean',
+        trustScore,
+        stakingAddress: (req as any).authAddress?.startsWith?.('0x')
+          ? (req as any).authAddress
+          : `0x${sha256Hex('gh-addr:' + id).slice(0, 40)}`,
         isSlashed: malicious,
         installCount: idx >= 0 ? apps[idx].installCount || 0 : 0,
-        // Phase 4 fields
         source: 'github',
         downloadUrl: b.downloadUrl,
         githubOwner: b.owner,
@@ -208,8 +215,9 @@ export function registerGithubRoutes(app: Express, deps: Deps) {
       res.json({
         success: true,
         app: record,
-        securityNote:
-          'Catalog entry only. Users must download from GitHub themselves. Provide real SHA-256 of the asset for accurate VT results.',
+        securityNote: hashVerified
+          ? 'Real SHA-256 used for VT. Users still download only from GitHub.'
+          : 'No real file hash — entry is unverified. Compute SHA-256 of the asset and re-import.',
         actor: (req as any).authAddress,
       });
     } catch (err: any) {
@@ -217,7 +225,6 @@ export function registerGithubRoutes(app: Express, deps: Deps) {
     }
   });
 
-  /** Hash a remote URL server-side only if size small — disabled by default for safety */
   app.post('/api/catalog/hash-url', mutateLimiter, requireAuth, async (req, res) => {
     try {
       if (process.env.ALLOW_REMOTE_HASH !== 'true') {
@@ -251,7 +258,7 @@ export function registerGithubRoutes(app: Express, deps: Deps) {
       }
       const hash = crypto.createHash('sha256').update(buf).digest('hex');
       const vt = await checkVirusTotalHash(hash);
-      res.json({ sha256: hash, size: buf.length, virustotalScore: vt });
+      res.json({ sha256: hash, size: buf.length, virustotalScore: vt, hashVerified: true });
     } catch (err: any) {
       res.status(500).json({ error: err.message || 'hash-url failed' });
     }
