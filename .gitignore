@@ -4,6 +4,7 @@ dist/
 .env.local
 .env.*.local
 uploads/
+data/audit.jsonl
 *.log
 .DS_Store
 manifest.json.tmp.*
