@@ -13,6 +13,7 @@ import { SiweMessage } from 'siwe';
 import { SignJWT, jwtVerify } from 'jose';
 import { registerGithubRoutes } from './githubRoutes';
 import { appendAudit } from './auditLog';
+import { registerOperatorConfigRoutes, secret } from './operatorConfig';
 
 dotenv.config();
 
@@ -27,11 +28,10 @@ const ADMIN_WALLETS = (process.env.ADMIN_WALLETS || '')
   .split(',')
   .map((s) => s.trim().toLowerCase())
   .filter(Boolean);
-const GEMINI_KEY = process.env.GEMINI_API_KEY || '';
-const VT_KEY = process.env.VIRUSTOTAL_API_KEY || '';
 const AUDIT_MAX = Number(process.env.AUDIT_MAX_CHARS) || 80_000;
 const MANIFEST_PATH = path.join(process.cwd(), 'manifest.json');
 const UPLOAD_DIR = path.join(process.cwd(), 'uploads');
+const WEAK_JWT = 'dev-insecure-jwt-secret-change-me';
 
 const app = express();
 
@@ -63,8 +63,22 @@ app.use('/api/', generalLimiter);
 
 const nonceStore = new Map<string, { nonce: string; exp: number }>();
 
+function jwtConfigured(): boolean {
+  if (!JWT_SECRET) return false;
+  if (IS_PROD && (JWT_SECRET === WEAK_JWT || JWT_SECRET.length < 24)) return false;
+  return true;
+}
+
 function jwtKey() {
-  return new TextEncoder().encode(JWT_SECRET || 'dev-insecure-jwt-secret-change-me');
+  return new TextEncoder().encode(JWT_SECRET || WEAK_JWT);
+}
+
+function geminiKey() {
+  return secret('GEMINI_API_KEY', process.env.GEMINI_API_KEY || '');
+}
+
+function vtKey() {
+  return secret('VIRUSTOTAL_API_KEY', process.env.VIRUSTOTAL_API_KEY || '');
 }
 
 async function issueSessionToken(address: string): Promise<string> {
@@ -85,7 +99,6 @@ async function verifySessionToken(token: string): Promise<string | null> {
   }
 }
 
-/** Empty allowlist OK in dev only; production requires explicit ADMIN_WALLETS. */
 function walletAllowed(address: string): boolean {
   if (ADMIN_WALLETS.length === 0) {
     return !IS_PROD;
@@ -129,9 +142,10 @@ async function requireAuth(
     if (address) {
       if (!walletAllowed(address)) {
         res.status(403).json({
-          error: IS_PROD && ADMIN_WALLETS.length === 0
-            ? 'Production requires ADMIN_WALLETS allowlist'
-            : 'Wallet not in ADMIN_WALLETS allowlist',
+          error:
+            IS_PROD && ADMIN_WALLETS.length === 0
+              ? 'Production requires ADMIN_WALLETS allowlist'
+              : 'Wallet not in ADMIN_WALLETS allowlist',
         });
         return;
       }
@@ -142,7 +156,7 @@ async function requireAuth(
     }
   }
 
-  if (!ADMIN_TOKEN && !JWT_SECRET) {
+  if (!ADMIN_TOKEN && !jwtConfigured()) {
     res.status(503).json({
       error: 'Auth not configured: set JWT_SECRET (SIWE) and/or ADMIN_API_TOKEN',
     });
@@ -204,12 +218,13 @@ function sha256Hex(buf: Buffer | string): string {
 }
 
 async function checkVirusTotalHash(hash: string): Promise<string> {
-  if (!VT_KEY) {
+  const key = vtKey();
+  if (!key) {
     return 'VT skipped (no API key)';
   }
   try {
     const res = await fetch(`https://www.virustotal.com/api/v3/files/${hash}`, {
-      headers: { 'x-apikey': VT_KEY },
+      headers: { 'x-apikey': key },
     });
     if (res.status === 404) {
       return '0/0 Unknown (not in VT DB)';
@@ -230,6 +245,21 @@ async function checkVirusTotalHash(hash: string): Promise<string> {
   } catch (e: any) {
     return `VT error: ${e.message || 'network'}`;
   }
+}
+
+function publicConfigStatus() {
+  return {
+    ok: true,
+    production: IS_PROD,
+    adminTokenConfigured: Boolean(ADMIN_TOKEN),
+    siweConfigured: jwtConfigured(),
+    adminWalletsCount: ADMIN_WALLETS.length,
+    allowlistRequired: IS_PROD,
+    gemini: Boolean(geminiKey()),
+    virustotal: Boolean(vtKey()),
+    githubToken: Boolean(secret('GITHUB_TOKEN', process.env.GITHUB_TOKEN || '')),
+    databaseUrl: Boolean(process.env.DATABASE_URL),
+  };
 }
 
 await fs.mkdir(UPLOAD_DIR, { recursive: true });
@@ -260,8 +290,12 @@ app.get('/api/auth/nonce', authLimiter, (req, res) => {
 
 app.post('/api/auth/verify', authLimiter, async (req, res) => {
   try {
-    if (!JWT_SECRET) {
-      res.status(503).json({ error: 'JWT_SECRET is not configured — SIWE sessions disabled' });
+    if (!jwtConfigured()) {
+      res.status(503).json({
+        error: IS_PROD
+          ? 'JWT_SECRET missing or too weak for production (min 24 chars, not default)'
+          : 'JWT_SECRET is not configured — SIWE sessions disabled',
+      });
       return;
     }
     const message = String(req.body?.message || '');
@@ -322,18 +356,13 @@ app.get('/api/auth/me', async (req, res) => {
 });
 
 app.get('/api/health', (_req, res) => {
-  res.json({
-    ok: true,
-    production: IS_PROD,
-    adminTokenConfigured: Boolean(ADMIN_TOKEN),
-    siweConfigured: Boolean(JWT_SECRET),
-    adminWalletsCount: ADMIN_WALLETS.length,
-    allowlistRequired: IS_PROD,
-    gemini: Boolean(GEMINI_KEY),
-    virustotal: Boolean(VT_KEY),
-    githubToken: Boolean(process.env.GITHUB_TOKEN),
-    databaseUrl: Boolean(process.env.DATABASE_URL),
-  });
+  res.json(publicConfigStatus());
+});
+
+registerOperatorConfigRoutes(app, {
+  requireAuth: requireAuth as any,
+  mutateLimiter,
+  getStatus: publicConfigStatus,
 });
 
 registerGithubRoutes(app, {
@@ -441,17 +470,18 @@ app.post('/api/slash', mutateLimiter, requireAuth, async (req, res) => {
       action: 'slash',
       actor: req.authAddress,
       method: req.authMethod,
-      detail: { id, amount: before },
+      detail: { id, amount: before, onChainTx: req.body?.onChainTx || null },
     });
     res.json({
       success: true,
-      message: 'Registry slash applied (SIWE/session). Deploy a staking contract for on-chain burn.',
+      message: 'Registry slash applied (SIWE/session).',
       slashedAddress: target.stakingAddress,
       slashedAmount: before,
       app: target,
       actor: req.authAddress,
       authMethod: req.authMethod,
-      onChain: false,
+      onChainTx: req.body?.onChainTx || null,
+      onChain: Boolean(req.body?.onChainTx),
     });
   } catch (err: any) {
     if (err?.name === 'ZodError') {
@@ -571,13 +601,14 @@ app.post('/api/audit', auditLimiter, async (req, res) => {
       return;
     }
 
-    if (!GEMINI_KEY) {
+    const key = geminiKey();
+    if (!key) {
       res.status(500).json({ error: 'GEMINI_API_KEY is not configured' });
       return;
     }
 
     const { GoogleGenAI } = await import('@google/genai');
-    const ai = new GoogleGenAI({ apiKey: GEMINI_KEY });
+    const ai = new GoogleGenAI({ apiKey: key });
 
     const systemPrompt = `You are VRAV Security Hub Deep AI Auditing Agent checking untrusted code for backdoors, hidden API channels, C2, reflection abuse, insecure intents, crypto bypass, or secret leakage.
 Analyze the source (${body.data.filename || 'code'}).
@@ -626,8 +657,8 @@ registerViteDevOrStatic().then(() => {
     if (IS_PROD && ADMIN_WALLETS.length === 0) {
       console.warn('[warn] PRODUCTION without ADMIN_WALLETS — SIWE mutations blocked');
     }
-    if (!JWT_SECRET) console.warn('[warn] JWT_SECRET not set — SIWE disabled');
+    if (!jwtConfigured()) console.warn('[warn] JWT_SECRET not set or too weak — SIWE disabled');
     if (!ADMIN_TOKEN) console.warn('[warn] ADMIN_API_TOKEN not set — legacy token auth off');
-    if (!GEMINI_KEY) console.warn('[warn] GEMINI_API_KEY not set — /api/audit disabled');
+    if (!geminiKey()) console.warn('[warn] GEMINI_API_KEY not set — /api/audit disabled');
   });
 });
