@@ -11,6 +11,7 @@ import multer from 'multer';
 import { z } from 'zod';
 import { SiweMessage } from 'siwe';
 import { SignJWT, jwtVerify } from 'jose';
+import { registerGithubRoutes } from './githubRoutes.ts';
 
 dotenv.config();
 
@@ -58,7 +59,6 @@ const authLimiter = rateLimit({
 
 app.use('/api/', generalLimiter);
 
-/** address(lowercase) -> { nonce, exp } */
 const nonceStore = new Map<string, { nonce: string; exp: number }>();
 
 function jwtKey() {
@@ -97,7 +97,6 @@ declare global {
   }
 }
 
-/** Bearer SIWE JWT or legacy X-Admin-Token */
 async function requireAuth(
   req: express.Request,
   res: express.Response,
@@ -117,9 +116,7 @@ async function requireAuth(
     const address = await verifySessionToken(token);
     if (address) {
       if (!walletAllowed(address)) {
-        res.status(403).json({
-          error: 'Wallet not in ADMIN_WALLETS allowlist',
-        });
+        res.status(403).json({ error: 'Wallet not in ADMIN_WALLETS allowlist' });
         return;
       }
       req.authMethod = 'siwe';
@@ -137,8 +134,7 @@ async function requireAuth(
   }
 
   res.status(401).json({
-    error:
-      'Unauthorized: Sign in with Ethereum (Bearer token) or provide X-Admin-Token',
+    error: 'Unauthorized: Sign in with Ethereum (Bearer token) or provide X-Admin-Token',
   });
 }
 
@@ -150,20 +146,14 @@ const AppSchema = z.object({
   description: z.string().max(4000).default(''),
   category: z.string().max(64).default('Utilities'),
   ipfsHash: z.string().min(1).max(128),
-  sha256: z
-    .string()
-    .regex(/^[a-fA-F0-9]{64}$/)
-    .optional(),
+  sha256: z.string().regex(/^[a-fA-F0-9]{64}$/).optional(),
   reputationStaked: z.coerce.number().min(0).max(1e9).default(10),
   authorizerSignature: z.string().max(256).optional(),
   virustotalScore: z.string().max(128).optional(),
   permissionsCount: z.coerce.number().int().min(0).max(1000).default(1),
   staticScanStatus: z.enum(['clean', 'warning', 'critical']).default('clean'),
   trustScore: z.coerce.number().min(0).max(100).default(100),
-  stakingAddress: z
-    .string()
-    .regex(/^0x[a-fA-F0-9]{40}$/)
-    .optional(),
+  stakingAddress: z.string().regex(/^0x[a-fA-F0-9]{40}$/).optional(),
   isSlashed: z.boolean().default(false),
   installCount: z.coerce.number().int().min(0).optional(),
 });
@@ -217,10 +207,7 @@ async function checkVirusTotalHash(hash: string): Promise<string> {
     const mal = Number(stats.malicious || 0);
     const sus = Number(stats.suspicious || 0);
     const total =
-      mal +
-      sus +
-      Number(stats.undetected || 0) +
-      Number(stats.harmless || 0);
+      mal + sus + Number(stats.undetected || 0) + Number(stats.harmless || 0);
     if (mal > 0) return `${mal}/${total} Malicious`;
     if (sus > 0) return `${sus}/${total} Suspicious`;
     return `0/${total} Clean`;
@@ -244,8 +231,6 @@ const upload = multer({
   },
 });
 
-// ─── Auth routes ──────────────────────────────────────────────────
-
 app.get('/api/auth/nonce', authLimiter, (req, res) => {
   const address = String(req.query.address || '').toLowerCase();
   if (!/^0x[a-f0-9]{40}$/.test(address)) {
@@ -260,9 +245,7 @@ app.get('/api/auth/nonce', authLimiter, (req, res) => {
 app.post('/api/auth/verify', authLimiter, async (req, res) => {
   try {
     if (!JWT_SECRET) {
-      res.status(503).json({
-        error: 'JWT_SECRET is not configured — SIWE sessions disabled',
-      });
+      res.status(503).json({ error: 'JWT_SECRET is not configured — SIWE sessions disabled' });
       return;
     }
     const message = String(req.body?.message || '');
@@ -298,9 +281,7 @@ app.post('/api/auth/verify', authLimiter, async (req, res) => {
     const token = await issueSessionToken(address);
     res.json({ token, address, expiresIn: '12h' });
   } catch (err: any) {
-    res.status(401).json({
-      error: err?.message || 'SIWE verification failed',
-    });
+    res.status(401).json({ error: err?.message || 'SIWE verification failed' });
   }
 });
 
@@ -315,10 +296,7 @@ app.get('/api/auth/me', async (req, res) => {
     res.status(401).json({ error: 'Invalid session' });
     return;
   }
-  res.json({
-    address,
-    allowlisted: walletAllowed(address),
-  });
+  res.json({ address, allowlisted: walletAllowed(address) });
 });
 
 app.get('/api/health', (_req, res) => {
@@ -329,7 +307,17 @@ app.get('/api/health', (_req, res) => {
     adminWalletsCount: ADMIN_WALLETS.length,
     gemini: Boolean(GEMINI_KEY),
     virustotal: Boolean(VT_KEY),
+    githubToken: Boolean(process.env.GITHUB_TOKEN),
   });
+});
+
+registerGithubRoutes(app, {
+  requireAuth: requireAuth as any,
+  mutateLimiter,
+  checkVirusTotalHash,
+  readManifest,
+  writeManifestAtomic,
+  sha256Hex,
 });
 
 app.get('/api/apps', async (_req, res) => {
@@ -367,16 +355,14 @@ app.post('/api/apps', mutateLimiter, requireAuth, async (req, res) => {
       ...body,
       sha256: sha,
       authorizerSignature:
-        body.authorizerSignature ||
-        `0x${sha256Hex('sig:' + body.id).slice(0, 64)}`,
+        body.authorizerSignature || `0x${sha256Hex('sig:' + body.id).slice(0, 64)}`,
       virustotalScore: vt,
       stakingAddress:
         body.stakingAddress ||
         (req.authAddress?.startsWith('0x')
           ? req.authAddress
           : `0x${sha256Hex('addr:' + body.id).slice(0, 40)}`),
-      installCount:
-        idx >= 0 ? apps[idx].installCount || 1 : body.installCount || 1,
+      installCount: idx >= 0 ? apps[idx].installCount || 1 : body.installCount || 1,
       isSlashed: body.isSlashed ?? false,
     };
 
@@ -384,12 +370,7 @@ app.post('/api/apps', mutateLimiter, requireAuth, async (req, res) => {
     else apps.push(record);
 
     await writeManifestAtomic(apps);
-    res.json({
-      success: true,
-      app: record,
-      authMethod: req.authMethod,
-      actor: req.authAddress,
-    });
+    res.json({ success: true, app: record, authMethod: req.authMethod, actor: req.authAddress });
   } catch (err: any) {
     res.status(500).json({ error: 'Failed to update manifest: ' + err.message });
   }
@@ -425,8 +406,7 @@ app.post('/api/slash', mutateLimiter, requireAuth, async (req, res) => {
     await writeManifestAtomic(apps);
     res.json({
       success: true,
-      message:
-        'Registry slash applied (SIWE/session). Deploy a staking contract for on-chain burn.',
+      message: 'Registry slash applied (SIWE/session). Deploy a staking contract for on-chain burn.',
       slashedAddress: target.stakingAddress,
       slashedAmount: before,
       app: target,
@@ -455,12 +435,8 @@ app.get('/api/attestation', async (req, res) => {
     const isSlashed = appRec.isSlashed === true;
     const material = `${appRec.id}|${appRec.version}|${appRec.sha256}|${appRec.ipfsHash}`;
     const reportId = `attest-vrav-${sha256Hex(material).slice(0, 16)}`;
-    const commitSha = isSlashed
-      ? '0'.repeat(40)
-      : sha256Hex(appRec.id + ':git').slice(0, 40);
-    const signature = isSlashed
-      ? '0x' + '0'.repeat(128)
-      : '0x' + sha256Hex(material + ':hsm');
+    const commitSha = isSlashed ? '0'.repeat(40) : sha256Hex(appRec.id + ':git').slice(0, 40);
+    const signature = isSlashed ? '0x' + '0'.repeat(128) : '0x' + sha256Hex(material + ':hsm');
 
     res.json({
       reportId,
@@ -545,17 +521,12 @@ app.post('/api/audit', auditLimiter, async (req, res) => {
       .safeParse(req.body);
 
     if (!body.success) {
-      res.status(400).json({
-        error: 'Invalid body',
-        details: body.error.flatten(),
-      });
+      res.status(400).json({ error: 'Invalid body', details: body.error.flatten() });
       return;
     }
 
     if (!GEMINI_KEY) {
-      res.status(500).json({
-        error: 'GEMINI_API_KEY is not configured',
-      });
+      res.status(500).json({ error: 'GEMINI_API_KEY is not configured' });
       return;
     }
 
