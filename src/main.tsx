@@ -7,6 +7,7 @@ import '@rainbow-me/rainbowkit/styles.css';
 
 import App from './App';
 import { WalletBar } from './components/WalletBar';
+import { GitHubCatalog } from './components/GitHubCatalog';
 import { wagmiConfig } from './lib/wagmiConfig';
 import './index.css';
 
@@ -25,6 +26,7 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
           modalSize="compact"
         >
           <WalletBar />
+          <GitHubCatalog />
           <App />
         </RainbowKitProvider>
       </QueryClientProvider>
