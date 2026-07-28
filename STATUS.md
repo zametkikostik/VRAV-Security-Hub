@@ -1,38 +1,30 @@
 # VRAV Security Hub — status
 
-## Implemented (phases 1–6 + store UX)
+## Done
 
 | Area | Status |
 |------|--------|
-| Hardened Express (helmet, rate limit, Zod, multer hash scan) | Done |
-| VirusTotal by file hash | Done |
-| Gemini audit API | Done |
-| RainbowKit + wagmi | Done |
-| SIWE JWT sessions | Done |
-| GitHub releases catalog + import | Done |
-| Client SHA-256 verified import | Done |
-| Store cards external Download + hashVerified | Done |
-| Audit log JSONL (+ optional Postgres) | Done |
-| Production ADMIN_WALLETS enforce | Done |
-| On-chain slash contract + UI path | Done |
-| Soft store refresh event | Done |
-| APK structure verifier + CI smoke | Done |
-| In-app Operator Setup for API keys | Done |
+| Hardened API, SIWE, VT, Gemini, Web3 | Done |
+| GitHub catalog + verified SHA import | Done |
+| Store external download + hashVerified | Done |
+| Audit JSONL + optional Postgres audit | Done |
+| On-chain slash contract + UI wiring | Done |
+| Soft refresh, APK structure CI | Done |
+| In-app Operator Setup | Done |
+| **Postgres primary catalog (`vrav_apps`)** | Done (opt-in DATABASE_URL) |
+| **Pinata IPFS pin from UI** | Done (PINATA_JWT) |
+| **deploy_slash.sh** | Done |
+| **Shared types / initialApps extract** | Done |
 
-## Remaining (not bugs — product roadmap)
+## Your ops checklist
 
-| Item | Why |
-|------|-----|
-| Postgres as primary app DB | Still `manifest.json` |
-| Real IPFS publish from UI | Scripts only |
-| APK apksigner in CI with real APK artifact | Needs build artifact |
-| iOS distribution | Not viable as generic IPA store |
-| Split `App.tsx` monolith | DX debt |
-| Deployed slash contract address | You deploy + paste |
-| WalletConnect real project id | You create at cloud.walletconnect.com |
+1. `.env`: JWT_SECRET, ADMIN_WALLETS
+2. Optional: DATABASE_URL, PINATA_JWT, GEMINI, VT, GITHUB_TOKEN
+3. WalletConnect project id (Operator Setup or VITE_)
+4. `npm run deploy:slash` → paste address
 
-## Known limitations (by design)
+## Residual debt
 
-- Not a binary CDN / auto-install mall
-- Metadata SHA without real file hash → unverified listing
-- Runtime operator keys reset on server restart unless in `.env`
+- Full split of 125KB `App.tsx` (types extracted; UI still in App)
+- Real apksigner needs a checked-in or built APK artifact in CI
+- iOS sideload store still not a product goal

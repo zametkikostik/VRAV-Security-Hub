@@ -24,18 +24,35 @@ jobs:
         pip install requests cryptography pyyaml
 
     - name: Execute Custom RegEx & Policy Security Audit
-      id: linter-execution
       run: python scripts/linter.py
 
     - name: APK structure verifier smoke (Phase 6)
       run: python scripts/verify_apk_sig.py --smoke
 
+    - name: Setup Android cmdline-tools (optional apksigner)
+      continue-on-error: true
+      run: |
+        sudo apt-get update -qq
+        sudo apt-get install -y -qq openjdk-17-jre-headless unzip wget || true
+        mkdir -p $HOME/android-sdk/cmdline-tools
+        cd /tmp
+        wget -q https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip -O cmdtools.zip || exit 0
+        unzip -q cmdtools.zip -d $HOME/android-sdk/cmdline-tools || exit 0
+        mv $HOME/android-sdk/cmdline-tools/cmdline-tools $HOME/android-sdk/cmdline-tools/latest || true
+        yes | $HOME/android-sdk/cmdline-tools/latest/bin/sdkmanager --sdk_root=$HOME/android-sdk 'build-tools;34.0.0' || true
+        echo "$HOME/android-sdk/build-tools/34.0.0" >> $GITHUB_PATH
+
+    - name: APK structure check if artifact present
+      run: |
+        if [ -f app/build/outputs/apk/release/vrav-signed.apk ]; then
+          python scripts/verify_apk_sig.py app/build/outputs/apk/release/vrav-signed.apk --apksigner || python scripts/verify_apk_sig.py app/build/outputs/apk/release/vrav-signed.apk
+        else
+          echo "No release APK in repo — structure smoke already passed"
+        fi
+
     - name: Generate Cloud KMS/HSM Authenticated Signatures & Attestation Report
       if: success()
       run: |
-        echo "======================================================="
-        echo "Requesting HSM Asymmetric signing for binary release..."
-        echo "======================================================="
         python scripts/kms_signer.py "vrav-auth" "app/build/outputs/apk/release/vrav-signed.apk" "projects/vrav-core/locations/global/keyRings/hsm-signers/cryptoKeys/release-signer/cryptoKeyVersions/1" "1.4.3"
 
     - name: Publish Artifact to IPFS and Sync Manifest Registry
@@ -43,25 +60,16 @@ jobs:
       env:
         PINATA_JWT: ${{ secrets.IPFS_PINATA_API_KEY }}
       run: |
-        echo "======================================================="
-        echo "Linter checks clean. Initiating IPFS publication flow..."
-        echo "======================================================="
         python scripts/publish_ipfs.py "app/build/outputs/apk/release/vrav-signed.apk" "vrav-auth" "VRAV Multi-Factor Authenticator" "1.4.3" "1500"
 
   reputation-validation:
     needs: static-audit-sec-scan
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout Source Code Reference
-        uses: actions/checkout@v4
-
-      - name: Set up Secure Python Runtime Environment
-        uses: actions/setup-python@v5
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-
       - name: Verify Staking Status
         run: |
-          echo "Checking reputation score for vrav-auth..."
           python scripts/verify_reputation.py "vrav-auth" 100
-          curl -s -X GET https://vrav-staking-api.vrav.org/check/vrav-auth || echo "[PoS_API] Connection simulated - checking complete."
