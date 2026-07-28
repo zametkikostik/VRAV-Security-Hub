@@ -14,6 +14,15 @@ import { SignJWT, jwtVerify } from 'jose';
 import { registerGithubRoutes } from './githubRoutes';
 import { appendAudit } from './auditLog';
 import { registerOperatorConfigRoutes, secret } from './operatorConfig';
+import {
+  initAppStore,
+  readApps,
+  writeApps,
+  upsertApp,
+  usingPostgres,
+  type AppRecord as StoreApp,
+} from './appStore';
+import { registerIpfsRoutes } from './ipfsRoutes';
 
 dotenv.config();
 
@@ -29,7 +38,6 @@ const ADMIN_WALLETS = (process.env.ADMIN_WALLETS || '')
   .map((s) => s.trim().toLowerCase())
   .filter(Boolean);
 const AUDIT_MAX = Number(process.env.AUDIT_MAX_CHARS) || 80_000;
-const MANIFEST_PATH = path.join(process.cwd(), 'manifest.json');
 const UPLOAD_DIR = path.join(process.cwd(), 'uploads');
 const WEAK_JWT = 'dev-insecure-jwt-secret-change-me';
 
@@ -197,20 +205,11 @@ type AppRecord = z.infer<typeof AppSchema> & {
 };
 
 async function readManifest(): Promise<AppRecord[]> {
-  try {
-    const raw = await fs.readFile(MANIFEST_PATH, 'utf-8');
-    const data = JSON.parse(raw);
-    if (!Array.isArray(data)) return [];
-    return data;
-  } catch {
-    return [];
-  }
+  return (await readApps()) as AppRecord[];
 }
 
 async function writeManifestAtomic(apps: AppRecord[]) {
-  const tmp = MANIFEST_PATH + `.tmp.${process.pid}`;
-  await fs.writeFile(tmp, JSON.stringify(apps, null, 2), 'utf-8');
-  await fs.rename(tmp, MANIFEST_PATH);
+  await writeApps(apps as StoreApp[]);
 }
 
 function sha256Hex(buf: Buffer | string): string {
@@ -259,10 +258,13 @@ function publicConfigStatus() {
     virustotal: Boolean(vtKey()),
     githubToken: Boolean(secret('GITHUB_TOKEN', process.env.GITHUB_TOKEN || '')),
     databaseUrl: Boolean(process.env.DATABASE_URL),
+    postgresCatalog: usingPostgres(),
+    pinata: Boolean(process.env.PINATA_JWT || process.env.IPFS_PINATA_API_KEY),
   };
 }
 
 await fs.mkdir(UPLOAD_DIR, { recursive: true });
+await initAppStore();
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -369,8 +371,16 @@ registerGithubRoutes(app, {
   requireAuth: requireAuth as any,
   mutateLimiter,
   checkVirusTotalHash,
-  readManifest,
-  writeManifestAtomic,
+  readManifest: readManifest as any,
+  writeManifestAtomic: writeManifestAtomic as any,
+  sha256Hex,
+});
+
+registerIpfsRoutes(app, {
+  requireAuth: requireAuth as any,
+  mutateLimiter,
+  upsertApp: upsertApp as any,
+  checkVirusTotalHash,
   sha256Hex,
 });
 
@@ -654,6 +664,7 @@ async function registerViteDevOrStatic() {
 registerViteDevOrStatic().then(() => {
   app.listen(PORT, () => {
     console.log(`VRAV Security Hub listening on :${PORT}`);
+    console.log(`[appStore] postgres=${usingPostgres()}`);
     if (IS_PROD && ADMIN_WALLETS.length === 0) {
       console.warn('[warn] PRODUCTION without ADMIN_WALLETS — SIWE mutations blocked');
     }
