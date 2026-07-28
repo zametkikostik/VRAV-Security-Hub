@@ -1,23 +1,31 @@
 import { getSessionToken } from './siweAuth';
 
 /**
- * Auth headers for mutation endpoints.
- * Preference: SIWE JWT (Bearer) → legacy VITE_ADMIN_API_TOKEN (dev break-glass).
+ * Headers for authenticated API mutations.
+ * Priority: SIWE Bearer → localStorage override → VITE_ADMIN_API_TOKEN
  */
-export function adminHeaders(extra: Record<string, string> = {}): Record<string, string> {
-  const session = getSessionToken();
-  const legacy = import.meta.env.VITE_ADMIN_API_TOKEN as string | undefined;
-
+export function adminHeaders(): Record<string, string> {
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
-    ...extra,
   };
 
-  if (session) {
-    headers['Authorization'] = `Bearer ${session}`;
-  } else if (legacy) {
-    headers['X-Admin-Token'] = legacy;
+  const siwe = getSessionToken();
+  if (siwe) {
+    headers.Authorization = `Bearer ${siwe}`;
+    return headers;
   }
 
+  let token: string | undefined;
+  try {
+    token = localStorage.getItem('vrav_admin_token_override') || undefined;
+  } catch {
+    /* ignore */
+  }
+  if (!token) {
+    token = import.meta.env.VITE_ADMIN_API_TOKEN as string | undefined;
+  }
+  if (token) {
+    headers['X-Admin-Token'] = token;
+  }
   return headers;
 }

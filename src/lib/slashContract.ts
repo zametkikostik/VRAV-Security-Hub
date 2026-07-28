@@ -1,6 +1,5 @@
 import { type Address } from 'viem';
 
-/** Minimal ABI for VravReputationSlash.slash / isSlashed */
 export const slashAbi = [
   {
     type: 'function',
@@ -36,8 +35,14 @@ export const slashAbi = [
 ] as const;
 
 export function getSlashContractAddress(): Address | null {
-  const raw =
+  let raw =
     (import.meta.env.VITE_SLASH_CONTRACT_ADDRESS as string | undefined) || '';
+  try {
+    const ls = localStorage.getItem('vrav_slash_contract');
+    if (ls) raw = ls;
+  } catch {
+    /* ignore */
+  }
   if (!/^0x[a-fA-F0-9]{40}$/.test(raw)) return null;
   return raw as Address;
 }

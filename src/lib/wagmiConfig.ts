@@ -2,13 +2,20 @@ import { getDefaultConfig } from '@rainbow-me/rainbowkit';
 import { http } from 'wagmi';
 import { mainnet, polygon, polygonAmoy, sepolia } from 'wagmi/chains';
 
-/**
- * WalletConnect Cloud project id: https://cloud.walletconnect.com
- * Without a real id, connection to WC wallets may fail; injected wallets (MetaMask) still work.
- */
-const projectId =
-  (import.meta.env.VITE_WALLETCONNECT_PROJECT_ID as string | undefined) ||
-  '00000000000000000000000000000000';
+function resolveProjectId(): string {
+  try {
+    const ls = localStorage.getItem('vrav_wc_project_id');
+    if (ls && ls.length >= 32) return ls;
+  } catch {
+    /* ignore */
+  }
+  return (
+    (import.meta.env.VITE_WALLETCONNECT_PROJECT_ID as string | undefined) ||
+    '00000000000000000000000000000000'
+  );
+}
+
+const projectId = resolveProjectId();
 
 export const wagmiConfig = getDefaultConfig({
   appName: 'VRAV Security Hub',
