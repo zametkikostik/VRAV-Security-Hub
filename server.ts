@@ -11,7 +11,7 @@ import multer from 'multer';
 import { z } from 'zod';
 import { SiweMessage } from 'siwe';
 import { SignJWT, jwtVerify } from 'jose';
-import { registerGithubRoutes } from './githubRoutes.ts';
+import { registerGithubRoutes } from './githubRoutes';
 
 dotenv.config();
 
