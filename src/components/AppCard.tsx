@@ -10,15 +10,10 @@ import {
   BadgeCheck,
   AlertTriangle,
 } from 'lucide-react';
-import { AppItem } from '../App';
+import type { AppItem } from '../types/app';
 
 interface AppCardProps {
-  app: AppItem & {
-    downloadUrl?: string;
-    hashVerified?: boolean;
-    source?: string;
-    sha256?: string;
-  };
+  app: AppItem;
   onInstall: (app: AppItem) => void;
   onSelectDetails: (app: AppItem) => void;
   onOpenAttestation: (appId: string) => void;

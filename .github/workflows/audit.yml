@@ -26,8 +26,13 @@ jobs:
     - name: Execute Custom RegEx & Policy Security Audit
       run: python scripts/linter.py
 
-    - name: APK structure verifier smoke (Phase 6)
+    - name: APK structure verifier smoke
       run: python scripts/verify_apk_sig.py --smoke
+
+    - name: Build fixture APK + structure verify
+      run: |
+        python scripts/make_fixture_apk.py
+        python scripts/verify_apk_sig.py fixtures/sample-unsigned.apk
 
     - name: Setup Android cmdline-tools (optional apksigner)
       continue-on-error: true
@@ -42,12 +47,21 @@ jobs:
         yes | $HOME/android-sdk/cmdline-tools/latest/bin/sdkmanager --sdk_root=$HOME/android-sdk 'build-tools;34.0.0' || true
         echo "$HOME/android-sdk/build-tools/34.0.0" >> $GITHUB_PATH
 
-    - name: APK structure check if artifact present
+    - name: apksigner on fixture (expect fail soft — unsigned)
+      continue-on-error: true
+      run: |
+        if command -v apksigner >/dev/null 2>&1; then
+          apksigner verify --verbose fixtures/sample-unsigned.apk || echo "unsigned fixture OK (expected verify fail)"
+        else
+          echo "apksigner not on PATH"
+        fi
+
+    - name: Real APK path if present
       run: |
         if [ -f app/build/outputs/apk/release/vrav-signed.apk ]; then
           python scripts/verify_apk_sig.py app/build/outputs/apk/release/vrav-signed.apk --apksigner || python scripts/verify_apk_sig.py app/build/outputs/apk/release/vrav-signed.apk
         else
-          echo "No release APK in repo — structure smoke already passed"
+          echo "No release APK — fixture + smoke covered structure"
         fi
 
     - name: Generate Cloud KMS/HSM Authenticated Signatures & Attestation Report

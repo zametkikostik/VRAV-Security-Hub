@@ -3,7 +3,7 @@ import react from '@vitejs/plugin-react';
 import path from 'path';
 import { defineConfig, type Plugin } from 'vite';
 
-/** Inject SIWE headers, soft refresh, and on-chain slash into App.tsx monolith. */
+/** Inject SIWE headers, soft refresh, on-chain slash; strip data monoliths into modules. */
 function injectAppHardening(): Plugin {
   return {
     name: 'inject-app-hardening',
@@ -12,6 +12,25 @@ function injectAppHardening(): Plugin {
       if (!id.replace(/\\/g, '/').endsWith('/src/App.tsx')) return null;
 
       let next = code;
+
+      // ── Residual: replace inline AppItem + INITIAL_APPS + MOCK_CODE_TEMPLATES ──
+      if (!next.includes("from './data/initialApps'") && next.includes('export interface AppItem')) {
+        next = next.replace(
+          /\/\/ Decoupled mock data[\s\S]*?const INITIAL_APPS: AppItem\[\] = \[[\s\S]*?\n\];\n\n\/\/ Mock Code Templates[\s\S]*?const MOCK_CODE_TEMPLATES = \[[\s\S]*?\n\];\n/,
+          `export type { AppItem } from './types/app';\nimport type { AppItem } from './types/app';\nimport { INITIAL_APPS } from './data/initialApps';\nimport { MOCK_CODE_TEMPLATES } from './data/mockCodeTemplates';\n\n`
+        );
+      }
+
+      // Fallback: only MOCK if interface already stripped elsewhere
+      if (
+        next.includes('const MOCK_CODE_TEMPLATES = [') &&
+        !next.includes("from './data/mockCodeTemplates'")
+      ) {
+        next = next.replace(
+          /\/\/ Mock Code Templates[\s\S]*?const MOCK_CODE_TEMPLATES = \[[\s\S]*?\n\];\n/,
+          `import { MOCK_CODE_TEMPLATES } from './data/mockCodeTemplates';\n\n`
+        );
+      }
 
       // ── imports ──────────────────────────────────────────────
       if (!next.includes("from './lib/adminHeaders'")) {
@@ -28,8 +47,8 @@ function injectAppHardening(): Plugin {
         );
       }
 
-      // ── AppItem optional catalog fields ──────────────────────
-      if (!next.includes('downloadUrl?: string')) {
+      // ── AppItem optional catalog fields (if still inline) ────
+      if (next.includes('export interface AppItem') && !next.includes('downloadUrl?: string')) {
         next = next.replace(
           `  isSlashed?: boolean;
 }`,
@@ -75,7 +94,6 @@ function injectAppHardening(): Plugin {
         );
       }
 
-      // ── publish still needs adminHeaders if not already ──────
       next = next.replace(
         `const response = await fetch('/api/apps', {
         method: 'POST',
@@ -89,8 +107,6 @@ function injectAppHardening(): Plugin {
           id: pubId,`
       );
 
-      // ── handleTriggerSlash → useSlashApp (on-chain + registry) ──
-      // Match both original Content-Type and previously injected adminHeaders()
       const slashFetchPatterns = [
         `const res = await fetch('/api/slash', {
         method: 'POST',
@@ -126,30 +142,23 @@ function injectAppHardening(): Plugin {
       if (slashResult.registry) {
         const result = slashResult.registry;`;
 
-      // The original code after fetch is:
-      //   if (res.ok) {
-      //     const result = await res.json();
-      // We need to splice carefully. Replace fetch + if (res.ok) { const result = await res.json();
-
       for (const pat of slashFetchPatterns) {
         if (next.includes(pat)) {
           next = next.replace(
             pat +
-              `
-      if (res.ok) {
-        const result = await res.json();`,
+              `\n      if (res.ok) {\n        const result = await res.json();`,
             slashReplacement
           );
           break;
         }
       }
 
-      // Fallback: only fetch line present without exact if block match
       for (const pat of slashFetchPatterns) {
         if (next.includes(pat) && !next.includes('slashAppOnChain(appId)')) {
-          next = next.replace(pat, slashReplacement + `
-      if (true) {
-        const result = slashResult.registry;`);
+          next = next.replace(
+            pat,
+            slashReplacement + `\n      if (true) {\n        const result = slashResult.registry;`
+          );
         }
       }
 
