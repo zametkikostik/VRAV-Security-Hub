@@ -1,13 +1,13 @@
 {
   "name": "vrav-security-hub",
   "private": true,
-  "version": "0.3.0",
+  "version": "0.4.0",
   "type": "module",
   "scripts": {
     "dev": "tsx server.ts",
-    "build": "vite build && esbuild server.ts --bundle --platform=node --format=cjs --packages=external --sourcemap --outfile=dist/server.cjs",
+    "build": "vite build && esbuild server.ts githubRoutes.ts auditLog.ts --bundle --platform=node --format=cjs --packages=external --sourcemap --outfile=dist/server.cjs",
     "preview": "node dist/server.cjs",
-    "clean": "rm -rf dist server.js dist/server.cjs dist/server.cjs.map uploads",
+    "clean": "rm -rf dist server.js dist/server.cjs dist/server.cjs.map uploads data/audit.jsonl",
     "lint": "tsc --noEmit",
     "start": "node dist/server.cjs"
   },
@@ -26,6 +26,7 @@
     "lucide-react": "^0.546.0",
     "motion": "^12.23.24",
     "multer": "^1.4.5-lts.1",
+    "pg": "^8.13.3",
     "react": "^19.0.1",
     "react-dom": "^19.0.1",
     "siwe": "^3.0.0",
@@ -39,6 +40,7 @@
     "@types/express": "^4.17.21",
     "@types/multer": "^1.4.12",
     "@types/node": "^22.14.0",
+    "@types/pg": "^8.11.11",
     "autoprefixer": "^10.4.21",
     "esbuild": "^0.25.0",
     "tailwindcss": "^4.1.14",
