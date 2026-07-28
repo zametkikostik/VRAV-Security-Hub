@@ -9,6 +9,8 @@ import cors from 'cors';
 import rateLimit from 'express-rate-limit';
 import multer from 'multer';
 import { z } from 'zod';
+import { SiweMessage } from 'siwe';
+import { SignJWT, jwtVerify } from 'jose';
 
 dotenv.config();
 
@@ -17,6 +19,11 @@ const __dirname = path.dirname(__filename);
 
 const PORT = Number(process.env.PORT) || 3000;
 const ADMIN_TOKEN = process.env.ADMIN_API_TOKEN || '';
+const JWT_SECRET = process.env.JWT_SECRET || '';
+const ADMIN_WALLETS = (process.env.ADMIN_WALLETS || '')
+  .split(',')
+  .map((s) => s.trim().toLowerCase())
+  .filter(Boolean);
 const GEMINI_KEY = process.env.GEMINI_API_KEY || '';
 const VT_KEY = process.env.VIRUSTOTAL_API_KEY || '';
 const AUDIT_MAX = Number(process.env.AUDIT_MAX_CHARS) || 80_000;
@@ -44,26 +51,95 @@ const mutateLimiter = rateLimit({
   windowMs: 60_000,
   max: 30,
 });
+const authLimiter = rateLimit({
+  windowMs: 60_000,
+  max: 40,
+});
 
 app.use('/api/', generalLimiter);
 
-function requireAdmin(
+/** address(lowercase) -> { nonce, exp } */
+const nonceStore = new Map<string, { nonce: string; exp: number }>();
+
+function jwtKey() {
+  return new TextEncoder().encode(JWT_SECRET || 'dev-insecure-jwt-secret-change-me');
+}
+
+async function issueSessionToken(address: string): Promise<string> {
+  return new SignJWT({ sub: address.toLowerCase(), role: 'siwe' })
+    .setProtectedHeader({ alg: 'HS256' })
+    .setIssuedAt()
+    .setExpirationTime('12h')
+    .sign(jwtKey());
+}
+
+async function verifySessionToken(token: string): Promise<string | null> {
+  try {
+    const { payload } = await jwtVerify(token, jwtKey());
+    const sub = typeof payload.sub === 'string' ? payload.sub.toLowerCase() : null;
+    return sub;
+  } catch {
+    return null;
+  }
+}
+
+function walletAllowed(address: string): boolean {
+  if (ADMIN_WALLETS.length === 0) return true;
+  return ADMIN_WALLETS.includes(address.toLowerCase());
+}
+
+declare global {
+  namespace Express {
+    interface Request {
+      authAddress?: string;
+      authMethod?: 'siwe' | 'admin-token';
+    }
+  }
+}
+
+/** Bearer SIWE JWT or legacy X-Admin-Token */
+async function requireAuth(
   req: express.Request,
   res: express.Response,
   next: express.NextFunction
 ) {
-  if (!ADMIN_TOKEN) {
+  const adminHeader = req.header('x-admin-token');
+  if (ADMIN_TOKEN && adminHeader && adminHeader === ADMIN_TOKEN) {
+    req.authMethod = 'admin-token';
+    req.authAddress = 'admin-token';
+    next();
+    return;
+  }
+
+  const auth = req.header('authorization');
+  if (auth?.startsWith('Bearer ')) {
+    const token = auth.slice(7).trim();
+    const address = await verifySessionToken(token);
+    if (address) {
+      if (!walletAllowed(address)) {
+        res.status(403).json({
+          error: 'Wallet not in ADMIN_WALLETS allowlist',
+        });
+        return;
+      }
+      req.authMethod = 'siwe';
+      req.authAddress = address;
+      next();
+      return;
+    }
+  }
+
+  if (!ADMIN_TOKEN && !JWT_SECRET) {
     res.status(503).json({
-      error: 'ADMIN_API_TOKEN is not configured on the server',
+      error: 'Auth not configured: set JWT_SECRET (SIWE) and/or ADMIN_API_TOKEN',
     });
     return;
   }
-  const token = req.header('x-admin-token');
-  if (!token || token !== ADMIN_TOKEN) {
-    res.status(401).json({ error: 'Unauthorized: invalid or missing X-Admin-Token' });
-    return;
-  }
-  next();
+
+  res.status(401).json({
+    error:
+      'Unauthorized: Sign in with Ethereum (Bearer token) or provide X-Admin-Token',
+  });
 }
 
 const AppSchema = z.object({
@@ -168,10 +244,89 @@ const upload = multer({
   },
 });
 
+// ─── Auth routes ──────────────────────────────────────────────────
+
+app.get('/api/auth/nonce', authLimiter, (req, res) => {
+  const address = String(req.query.address || '').toLowerCase();
+  if (!/^0x[a-f0-9]{40}$/.test(address)) {
+    res.status(400).json({ error: 'Valid address query required' });
+    return;
+  }
+  const nonce = crypto.randomBytes(16).toString('hex');
+  nonceStore.set(address, { nonce, exp: Date.now() + 5 * 60_000 });
+  res.json({ nonce });
+});
+
+app.post('/api/auth/verify', authLimiter, async (req, res) => {
+  try {
+    if (!JWT_SECRET) {
+      res.status(503).json({
+        error: 'JWT_SECRET is not configured — SIWE sessions disabled',
+      });
+      return;
+    }
+    const message = String(req.body?.message || '');
+    const signature = String(req.body?.signature || '');
+    if (!message || !signature) {
+      res.status(400).json({ error: 'message and signature required' });
+      return;
+    }
+
+    const siwe = new SiweMessage(message);
+    const host = req.get('host') || 'localhost';
+    const expectedDomain = process.env.SIWE_DOMAIN || host;
+
+    const fields = await siwe.verify({
+      signature,
+      domain: expectedDomain,
+      nonce: siwe.nonce,
+    });
+
+    const address = fields.data.address.toLowerCase();
+    const stored = nonceStore.get(address);
+    if (!stored || stored.nonce !== fields.data.nonce || stored.exp < Date.now()) {
+      res.status(401).json({ error: 'Invalid or expired nonce' });
+      return;
+    }
+    nonceStore.delete(address);
+
+    if (!walletAllowed(address)) {
+      res.status(403).json({ error: 'Wallet not in ADMIN_WALLETS allowlist' });
+      return;
+    }
+
+    const token = await issueSessionToken(address);
+    res.json({ token, address, expiresIn: '12h' });
+  } catch (err: any) {
+    res.status(401).json({
+      error: err?.message || 'SIWE verification failed',
+    });
+  }
+});
+
+app.get('/api/auth/me', async (req, res) => {
+  const auth = req.header('authorization');
+  if (!auth?.startsWith('Bearer ')) {
+    res.status(401).json({ error: 'No Bearer token' });
+    return;
+  }
+  const address = await verifySessionToken(auth.slice(7).trim());
+  if (!address) {
+    res.status(401).json({ error: 'Invalid session' });
+    return;
+  }
+  res.json({
+    address,
+    allowlisted: walletAllowed(address),
+  });
+});
+
 app.get('/api/health', (_req, res) => {
   res.json({
     ok: true,
-    adminConfigured: Boolean(ADMIN_TOKEN),
+    adminTokenConfigured: Boolean(ADMIN_TOKEN),
+    siweConfigured: Boolean(JWT_SECRET),
+    adminWalletsCount: ADMIN_WALLETS.length,
     gemini: Boolean(GEMINI_KEY),
     virustotal: Boolean(VT_KEY),
   });
@@ -186,7 +341,7 @@ app.get('/api/apps', async (_req, res) => {
   }
 });
 
-app.post('/api/apps', mutateLimiter, requireAdmin, async (req, res) => {
+app.post('/api/apps', mutateLimiter, requireAuth, async (req, res) => {
   try {
     const parsed = AppSchema.safeParse(req.body);
     if (!parsed.success) {
@@ -217,7 +372,9 @@ app.post('/api/apps', mutateLimiter, requireAdmin, async (req, res) => {
       virustotalScore: vt,
       stakingAddress:
         body.stakingAddress ||
-        `0x${sha256Hex('addr:' + body.id).slice(0, 40)}`,
+        (req.authAddress?.startsWith('0x')
+          ? req.authAddress
+          : `0x${sha256Hex('addr:' + body.id).slice(0, 40)}`),
       installCount:
         idx >= 0 ? apps[idx].installCount || 1 : body.installCount || 1,
       isSlashed: body.isSlashed ?? false,
@@ -227,13 +384,18 @@ app.post('/api/apps', mutateLimiter, requireAdmin, async (req, res) => {
     else apps.push(record);
 
     await writeManifestAtomic(apps);
-    res.json({ success: true, app: record });
+    res.json({
+      success: true,
+      app: record,
+      authMethod: req.authMethod,
+      actor: req.authAddress,
+    });
   } catch (err: any) {
     res.status(500).json({ error: 'Failed to update manifest: ' + err.message });
   }
 });
 
-app.post('/api/slash', mutateLimiter, requireAdmin, async (req, res) => {
+app.post('/api/slash', mutateLimiter, requireAuth, async (req, res) => {
   try {
     const id = z.string().min(1).parse(req.body?.id);
     const apps = await readManifest();
@@ -263,10 +425,14 @@ app.post('/api/slash', mutateLimiter, requireAdmin, async (req, res) => {
     await writeManifestAtomic(apps);
     res.json({
       success: true,
-      message: 'Slashed (registry update). On-chain slash comes in Web3 phase.',
+      message:
+        'Registry slash applied (SIWE/session). Deploy a staking contract for on-chain burn.',
       slashedAddress: target.stakingAddress,
       slashedAmount: before,
       app: target,
+      actor: req.authAddress,
+      authMethod: req.authMethod,
+      onChain: false,
     });
   } catch (err: any) {
     if (err?.name === 'ZodError') {
@@ -337,7 +503,7 @@ app.get('/api/attestation', async (req, res) => {
 app.post(
   '/api/scan-file',
   mutateLimiter,
-  requireAdmin,
+  requireAuth,
   (req, res, next) => {
     upload.single('file')(req, res, (err) => {
       if (err) {
@@ -361,6 +527,7 @@ app.post(
         sha256: hash,
         virustotalScore: vt,
         note: 'Hash-only scan. File is not stored for distribution.',
+        actor: req.authAddress,
       });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
@@ -439,7 +606,8 @@ async function registerViteDevOrStatic() {
 registerViteDevOrStatic().then(() => {
   app.listen(PORT, () => {
     console.log(`VRAV Security Hub listening on :${PORT}`);
-    if (!ADMIN_TOKEN) console.warn('[warn] ADMIN_API_TOKEN not set — mutations disabled');
+    if (!JWT_SECRET) console.warn('[warn] JWT_SECRET not set — SIWE disabled');
+    if (!ADMIN_TOKEN) console.warn('[warn] ADMIN_API_TOKEN not set — legacy token auth off');
     if (!GEMINI_KEY) console.warn('[warn] GEMINI_API_KEY not set — /api/audit disabled');
   });
 });
