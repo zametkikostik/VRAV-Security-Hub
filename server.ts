@@ -12,6 +12,7 @@ import { z } from 'zod';
 import { SiweMessage } from 'siwe';
 import { SignJWT, jwtVerify } from 'jose';
 import { registerGithubRoutes } from './githubRoutes';
+import { appendAudit } from './auditLog';
 
 dotenv.config();
 
@@ -21,6 +22,7 @@ const __dirname = path.dirname(__filename);
 const PORT = Number(process.env.PORT) || 3000;
 const ADMIN_TOKEN = process.env.ADMIN_API_TOKEN || '';
 const JWT_SECRET = process.env.JWT_SECRET || '';
+const IS_PROD = process.env.NODE_ENV === 'production';
 const ADMIN_WALLETS = (process.env.ADMIN_WALLETS || '')
   .split(',')
   .map((s) => s.trim().toLowerCase())
@@ -83,8 +85,11 @@ async function verifySessionToken(token: string): Promise<string | null> {
   }
 }
 
+/** Empty allowlist OK in dev only; production requires explicit ADMIN_WALLETS. */
 function walletAllowed(address: string): boolean {
-  if (ADMIN_WALLETS.length === 0) return true;
+  if (ADMIN_WALLETS.length === 0) {
+    return !IS_PROD;
+  }
   return ADMIN_WALLETS.includes(address.toLowerCase());
 }
 
@@ -110,13 +115,24 @@ async function requireAuth(
     return;
   }
 
+  if (IS_PROD && ADMIN_WALLETS.length === 0 && !ADMIN_TOKEN) {
+    res.status(503).json({
+      error: 'Production misconfigured: set ADMIN_WALLETS and/or ADMIN_API_TOKEN',
+    });
+    return;
+  }
+
   const auth = req.header('authorization');
   if (auth?.startsWith('Bearer ')) {
     const token = auth.slice(7).trim();
     const address = await verifySessionToken(token);
     if (address) {
       if (!walletAllowed(address)) {
-        res.status(403).json({ error: 'Wallet not in ADMIN_WALLETS allowlist' });
+        res.status(403).json({
+          error: IS_PROD && ADMIN_WALLETS.length === 0
+            ? 'Production requires ADMIN_WALLETS allowlist'
+            : 'Wallet not in ADMIN_WALLETS allowlist',
+        });
         return;
       }
       req.authMethod = 'siwe';
@@ -279,6 +295,12 @@ app.post('/api/auth/verify', authLimiter, async (req, res) => {
     }
 
     const token = await issueSessionToken(address);
+    await appendAudit({
+      ts: new Date().toISOString(),
+      action: 'siwe_login',
+      actor: address,
+      method: 'siwe',
+    });
     res.json({ token, address, expiresIn: '12h' });
   } catch (err: any) {
     res.status(401).json({ error: err?.message || 'SIWE verification failed' });
@@ -302,12 +324,15 @@ app.get('/api/auth/me', async (req, res) => {
 app.get('/api/health', (_req, res) => {
   res.json({
     ok: true,
+    production: IS_PROD,
     adminTokenConfigured: Boolean(ADMIN_TOKEN),
     siweConfigured: Boolean(JWT_SECRET),
     adminWalletsCount: ADMIN_WALLETS.length,
+    allowlistRequired: IS_PROD,
     gemini: Boolean(GEMINI_KEY),
     virustotal: Boolean(VT_KEY),
     githubToken: Boolean(process.env.GITHUB_TOKEN),
+    databaseUrl: Boolean(process.env.DATABASE_URL),
   });
 });
 
@@ -370,6 +395,13 @@ app.post('/api/apps', mutateLimiter, requireAuth, async (req, res) => {
     else apps.push(record);
 
     await writeManifestAtomic(apps);
+    await appendAudit({
+      ts: new Date().toISOString(),
+      action: 'app_upsert',
+      actor: req.authAddress,
+      method: req.authMethod,
+      detail: { id: record.id, name: record.name },
+    });
     res.json({ success: true, app: record, authMethod: req.authMethod, actor: req.authAddress });
   } catch (err: any) {
     res.status(500).json({ error: 'Failed to update manifest: ' + err.message });
@@ -404,6 +436,13 @@ app.post('/api/slash', mutateLimiter, requireAuth, async (req, res) => {
     target.staticScanStatus = 'critical';
     apps[idx] = target;
     await writeManifestAtomic(apps);
+    await appendAudit({
+      ts: new Date().toISOString(),
+      action: 'slash',
+      actor: req.authAddress,
+      method: req.authMethod,
+      detail: { id, amount: before },
+    });
     res.json({
       success: true,
       message: 'Registry slash applied (SIWE/session). Deploy a staking contract for on-chain burn.',
@@ -497,6 +536,13 @@ app.post(
       }
       const hash = sha256Hex(req.file.buffer);
       const vt = await checkVirusTotalHash(hash);
+      await appendAudit({
+        ts: new Date().toISOString(),
+        action: 'scan_file',
+        actor: req.authAddress,
+        method: req.authMethod,
+        detail: { filename: req.file.originalname, sha256: hash, vt },
+      });
       res.json({
         filename: req.file.originalname,
         size: req.file.size,
@@ -577,6 +623,9 @@ async function registerViteDevOrStatic() {
 registerViteDevOrStatic().then(() => {
   app.listen(PORT, () => {
     console.log(`VRAV Security Hub listening on :${PORT}`);
+    if (IS_PROD && ADMIN_WALLETS.length === 0) {
+      console.warn('[warn] PRODUCTION without ADMIN_WALLETS — SIWE mutations blocked');
+    }
     if (!JWT_SECRET) console.warn('[warn] JWT_SECRET not set — SIWE disabled');
     if (!ADMIN_TOKEN) console.warn('[warn] ADMIN_API_TOKEN not set — legacy token auth off');
     if (!GEMINI_KEY) console.warn('[warn] GEMINI_API_KEY not set — /api/audit disabled');
