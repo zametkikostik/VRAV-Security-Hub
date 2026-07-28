@@ -34,7 +34,6 @@ export async function slashAppFull(params: {
       });
       onChain = true;
     } catch (e: any) {
-      // Fall through to registry-only if user rejects or not owner
       console.warn('[slash] on-chain failed:', e?.shortMessage || e?.message);
     }
   }
@@ -50,6 +49,10 @@ export async function slashAppFull(params: {
   const registry = await res.json();
   if (!res.ok) {
     throw new Error(registry.error || 'Registry slash failed');
+  }
+
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent('vrav-apps-refresh'));
   }
 
   return {
