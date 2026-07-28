@@ -3,57 +3,84 @@ import react from '@vitejs/plugin-react';
 import path from 'path';
 import { defineConfig, type Plugin } from 'vite';
 
-/** Inject SIWE/admin headers into App.tsx mutation fetches without rewriting the whole monolith. */
-function injectAdminHeaders(): Plugin {
+/** Inject SIWE headers + soft refresh listener into App.tsx monolith. */
+function injectAppHardening(): Plugin {
   return {
-    name: 'inject-admin-headers',
+    name: 'inject-app-hardening',
     enforce: 'pre',
     transform(code, id) {
       if (!id.replace(/\\/g, '/').endsWith('/src/App.tsx')) return null;
-      if (code.includes("from './lib/adminHeaders'")) return null;
 
-      let next = code.replace(
-        "import { SettingsTab } from './components/SettingsTab';",
-        "import { SettingsTab } from './components/SettingsTab';\nimport { adminHeaders } from './lib/adminHeaders';"
-      );
+      let next = code;
 
-      next = next.replace(
-        `const res = await fetch('/api/slash', {
+      if (!next.includes("from './lib/adminHeaders'")) {
+        next = next.replace(
+          "import { SettingsTab } from './components/SettingsTab';",
+          "import { SettingsTab } from './components/SettingsTab';\nimport { adminHeaders } from './lib/adminHeaders';"
+        );
+
+        next = next.replace(
+          `const res = await fetch('/api/slash', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ id: appId })
       });`,
-        `const res = await fetch('/api/slash', {
+          `const res = await fetch('/api/slash', {
         method: 'POST',
         headers: adminHeaders(),
         body: JSON.stringify({ id: appId })
       });`
-      );
+        );
 
-      next = next.replace(
-        `const response = await fetch('/api/apps', {
+        next = next.replace(
+          `const response = await fetch('/api/apps', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           id: pubId,`,
-        `const response = await fetch('/api/apps', {
+          `const response = await fetch('/api/apps', {
         method: 'POST',
         headers: adminHeaders(),
         body: JSON.stringify({
           id: pubId,`
-      );
+        );
+      }
 
-      // Extend AppItem interface for catalog fields
-      next = next.replace(
-        `  isSlashed?: boolean;
+      if (!next.includes('downloadUrl?: string')) {
+        next = next.replace(
+          `  isSlashed?: boolean;
 }`,
-        `  isSlashed?: boolean;
+          `  isSlashed?: boolean;
   downloadUrl?: string;
   hashVerified?: boolean;
   source?: string;
   sha256?: string;
 }`
-      );
+        );
+      }
+
+      // Soft refresh: listen for catalog import / slash events
+      if (!next.includes('vrav-apps-refresh')) {
+        next = next.replace(
+          `const [isAppsLoading, setIsAppsLoading] = useState(true);`,
+          `const [isAppsLoading, setIsAppsLoading] = useState(true);
+  // phase6: soft store refresh without full page reload
+  useEffect(() => {
+    const reloadApps = () => {
+      setIsAppsLoading(true);
+      fetch('/api/apps')
+        .then((r) => r.json())
+        .then((data) => {
+          if (Array.isArray(data)) setAppsList(data);
+        })
+        .catch(() => {})
+        .finally(() => setIsAppsLoading(false));
+    };
+    window.addEventListener('vrav-apps-refresh', reloadApps);
+    return () => window.removeEventListener('vrav-apps-refresh', reloadApps);
+  }, []);`
+        );
+      }
 
       return { code: next, map: null };
     },
@@ -61,7 +88,7 @@ function injectAdminHeaders(): Plugin {
 }
 
 export default defineConfig({
-  plugins: [injectAdminHeaders(), react(), tailwindcss()],
+  plugins: [injectAppHardening(), react(), tailwindcss()],
   resolve: {
     alias: {
       '@': path.resolve(__dirname, '.'),

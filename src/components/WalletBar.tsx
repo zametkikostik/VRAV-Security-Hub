@@ -7,6 +7,7 @@ import {
   getSessionToken,
   signInWithEthereum,
 } from '../lib/siweAuth';
+import { slashContractConfigured } from '../lib/slashContract';
 
 export function WalletBar() {
   const { address, isConnected } = useAccount();
@@ -69,6 +70,8 @@ export function WalletBar() {
     Boolean(address) &&
     siweAddress!.toLowerCase() === address!.toLowerCase();
 
+  const onChainSlash = slashContractConfigured();
+
   return (
     <div className="fixed top-3 right-3 z-[100] flex flex-col items-end gap-2 pointer-events-none">
       <div className="pointer-events-auto shadow-lg rounded-xl">
@@ -99,8 +102,9 @@ export function WalletBar() {
               {busy ? 'Signing…' : 'Sign in with Ethereum'}
             </button>
           )}
-          <div className="px-2.5 py-1 rounded-lg bg-neutral-950/90 border border-slate-700 text-[10px] font-mono text-slate-400 max-w-[260px] truncate">
+          <div className="px-2.5 py-1 rounded-lg bg-neutral-950/90 border border-slate-700 text-[10px] font-mono text-slate-400 max-w-[280px]">
             chain:{chainId} · {address.slice(0, 6)}…{address.slice(-4)}
+            {onChainSlash ? ' · on-chain slash ON' : ' · registry slash only'}
           </div>
           {error && (
             <div className="px-2 py-1 rounded bg-red-950/90 border border-red-800 text-[10px] text-red-300 max-w-[260px]">

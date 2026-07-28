@@ -27,6 +27,9 @@ jobs:
       id: linter-execution
       run: python scripts/linter.py
 
+    - name: APK structure verifier smoke (Phase 6)
+      run: python scripts/verify_apk_sig.py --smoke
+
     - name: Generate Cloud KMS/HSM Authenticated Signatures & Attestation Report
       if: success()
       run: |
